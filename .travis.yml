@@ -1,12 +1,13 @@
-dist: xenial
+dist: bionic
 sudo: false
 language: python
 
 python:
-  - "3.6"
+#  - "3.6"
   - "3.7"
   - "3.8"
   - "3.9"
+  - "3.10"
 
 env:
   - SKIP_IPV6_TESTS=true
@@ -15,6 +16,7 @@ env:
 #  - chmod +x $TRAVIS_BUILD_DIR/tests/3proxy/bin/linux/3proxy
 
 install:
+#  - pip install importlib_metadata -U
   - pip install -r requirements-dev.txt
   - pip install -e .
 
