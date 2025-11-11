@@ -23,9 +23,13 @@ async def connect_tcp(
     if is_ipv6_address(host):
         address = (host, port, 0, 0)  # to fix OSError: [WinError 10022]
     else:
-        address = (host, port)
+        address = (host, port)  # type: ignore[assignment]
 
-    await loop.sock_connect(sock=sock, address=address)
+    try:
+        await loop.sock_connect(sock=sock, address=address)
+    except OSError:
+        sock.close()
+        raise
     return sock
 
 

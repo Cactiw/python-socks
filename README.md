@@ -1,22 +1,23 @@
 ## python-socks
 
-[![Build Status](https://api.travis-ci.com/romis2012/python-socks.svg?branch=master)](https://travis-ci.com/github/romis2012/python-socks)
-[![Coverage Status](https://coveralls.io/repos/github/romis2012/python-socks/badge.svg?branch=master&_=q)](https://coveralls.io/github/romis2012/python-socks?branch=master)
-[![PyPI version](https://badge.fury.io/py/python-socks.svg)](https://badge.fury.io/py/python-socks)
+[![CI](https://github.com/romis2012/python-socks/actions/workflows/ci.yml/badge.svg)](https://github.com/romis2012/python-socks/actions/workflows/ci.yml)
+[![Coverage Status](https://codecov.io/gh/romis2012/python-socks/branch/master/graph/badge.svg)](https://codecov.io/gh/romis2012/python-socks)
+[![PyPI version](https://badge.fury.io/py/python-socks.svg)](https://pypi.python.org/pypi/python-socks)
+[![versions](https://img.shields.io/pypi/pyversions/python-socks.svg)](https://github.com/romis2012/python-socks)
 <!--
 [![Downloads](https://pepy.tech/badge/python-socks/month)](https://pepy.tech/project/python-socks)
 -->
 
 The `python-socks` package provides a core proxy client functionality for Python.
-Supports SOCKS4(a), SOCKS5(h), HTTP (tunneling) proxy and provides sync and async (asyncio, trio, curio, anyio) APIs.
+Supports `SOCKS4(a)`, `SOCKS5(h)`, `HTTP CONNECT` proxy and provides sync and async (asyncio, trio, curio, anyio) APIs.
 You probably don't need to use `python-socks` directly. 
 It is used internally by 
 [aiohttp-socks](https://github.com/romis2012/aiohttp-socks) and [httpx-socks](https://github.com/romis2012/httpx-socks) packages.  
 
 ## Requirements
-- Python >= 3.6
-- async-timeout >= 3.0.1 (optional)
-- trio >= 0.16.0 (optional)
+- Python >= 3.8
+- async-timeout >= 4.0 (optional)
+- trio >= 0.24 (optional)
 - curio >= 1.4 (optional)
 - anyio >= 3.3.4 (optional)
 

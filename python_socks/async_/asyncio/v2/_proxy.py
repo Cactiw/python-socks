@@ -1,16 +1,26 @@
 import asyncio
 import ssl
+from typing import Any, Optional, Tuple
+import warnings
+import sys
 
-import async_timeout
 
-from ...._errors import ProxyConnectionError, ProxyTimeoutError
-from ...._proto.http_async import HttpProto
-from ...._proto.socks4_async import Socks4Proto
-from ...._proto.socks5_async import Socks5Proto
+from ...._types import ProxyType
+from ...._helpers import parse_proxy_url
+from ...._errors import ProxyConnectionError, ProxyTimeoutError, ProxyError
+
+from ...._protocols.errors import ReplyError
+from ...._connectors.factory_async import create_connector
 
 from .._resolver import Resolver
 from ._stream import AsyncioSocketStream
 from ._connect import connect_tcp
+
+if sys.version_info >= (3, 11):
+    import asyncio as async_timeout  # pylint:disable=reimported
+else:
+    import async_timeout
+
 
 DEFAULT_TIMEOUT = 60
 
@@ -18,204 +28,130 @@ DEFAULT_TIMEOUT = 60
 class AsyncioProxy:
     def __init__(
         self,
-        proxy_host: str,
-        proxy_port: int,
-        proxy_ssl: ssl.SSLContext = None,
-        loop: asyncio.AbstractEventLoop = None,
+        proxy_type: ProxyType,
+        host: str,
+        port: int,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        rdns: Optional[bool] = None,
+        proxy_ssl: Optional[ssl.SSLContext] = None,
+        forward: Optional['AsyncioProxy'] = None,
+        loop: Optional[asyncio.AbstractEventLoop] = None,
     ):
+        if loop is not None:  # pragma: no cover
+            warnings.warn(
+                'The loop argument is deprecated and scheduled for removal in the future.',
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
         if loop is None:
             loop = asyncio.get_event_loop()
 
         self._loop = loop
 
-        self._proxy_host = proxy_host
-        self._proxy_port = proxy_port
+        self._proxy_type = proxy_type
+        self._proxy_host = host
+        self._proxy_port = port
+        self._username = username
+        self._password = password
+        self._rdns = rdns
+
         self._proxy_ssl = proxy_ssl
+        self._forward = forward
 
-        self._dest_host = None
-        self._dest_port = None
-        self._dest_ssl = None
-        self._timeout = None
-
-        self._stream = None
         self._resolver = Resolver(loop=loop)
 
     async def connect(
         self,
         dest_host: str,
         dest_port: int,
-        dest_ssl: ssl.SSLContext = None,
-        timeout: float = None,
-        _stream: AsyncioSocketStream = None,
+        dest_ssl: Optional[ssl.SSLContext] = None,
+        timeout: Optional[float] = None,
+        **kwargs: Any,
     ) -> AsyncioSocketStream:
-
         if timeout is None:
             timeout = DEFAULT_TIMEOUT
 
-        self._dest_host = dest_host
-        self._dest_port = dest_port
-        self._dest_ssl = dest_ssl
-        self._timeout = timeout
+        local_addr = kwargs.get('local_addr')
+        try:
+            async with async_timeout.timeout(timeout):
+                return await self._connect(
+                    dest_host=dest_host,
+                    dest_port=dest_port,
+                    dest_ssl=dest_ssl,
+                    local_addr=local_addr,
+                )
+        except asyncio.TimeoutError as e:
+            raise ProxyTimeoutError('Proxy connection timed out: {}'.format(timeout)) from e
+
+    async def _connect(
+        self,
+        dest_host: str,
+        dest_port: int,
+        dest_ssl: Optional[ssl.SSLContext] = None,
+        local_addr: Optional[Tuple[str, int]] = None,
+    ) -> AsyncioSocketStream:
+        if self._forward is None:
+            try:
+                stream = await connect_tcp(
+                    host=self._proxy_host,
+                    port=self._proxy_port,
+                    loop=self._loop,
+                    local_addr=local_addr,
+                )
+            except OSError as e:
+                raise ProxyConnectionError(
+                    e.errno,
+                    "Couldn't connect to proxy"
+                    f" {self._proxy_host}:{self._proxy_port} [{e.strerror}]",
+                ) from e
+        else:
+            stream = await self._forward.connect(
+                dest_host=self._proxy_host,
+                dest_port=self._proxy_port,
+            )
 
         try:
-            return await self._connect(_stream)
-        except asyncio.TimeoutError as e:
-            raise ProxyTimeoutError('Proxy connection timed out: {}'.format(self._timeout)) from e
-
-    async def _connect(self, _stream: AsyncioSocketStream) -> AsyncioSocketStream:
-        async with async_timeout.timeout(self._timeout):
-            try:
-                if _stream is None:
-                    reader, writer = await connect_tcp(
-                        host=self._proxy_host,
-                        port=self._proxy_port,
-                    )
-                    self._stream = AsyncioSocketStream(
-                        loop=self._loop,
-                        reader=reader,
-                        writer=writer,
-                    )
-                else:
-                    self._stream = _stream
-
-                if self._proxy_ssl is not None:  # pragma: no cover
-                    self._stream = await self._stream.start_tls(
-                        hostname=self._proxy_host,
-                        ssl_context=self._proxy_ssl,
-                    )
-            except OSError as e:
-                await self._close()
-                msg = 'Could not connect to proxy {}:{} [{}]'.format(
-                    self._proxy_host,
-                    self._proxy_port,
-                    e.strerror,
+            if self._proxy_ssl is not None:
+                stream = await stream.start_tls(
+                    hostname=self._proxy_host,
+                    ssl_context=self._proxy_ssl,
                 )
-                raise ProxyConnectionError(e.errno, msg) from e
-            except (asyncio.CancelledError, Exception):
-                await self._close()
-                raise
 
-            try:
-                await self._negotiate()
+            connector = create_connector(
+                proxy_type=self._proxy_type,
+                username=self._username,
+                password=self._password,
+                rdns=self._rdns,
+                resolver=self._resolver,
+            )
 
-                if self._dest_ssl is not None:
-                    self._stream = await self._stream.start_tls(
-                        hostname=self._dest_host,
-                        ssl_context=self._dest_ssl,
-                    )
-            except (asyncio.CancelledError, Exception):
-                await self._close()
-                raise
+            await connector.connect(
+                stream=stream,
+                host=dest_host,
+                port=dest_port,
+            )
 
-            return self._stream
+            if dest_ssl is not None:
+                stream = await stream.start_tls(
+                    hostname=dest_host,
+                    ssl_context=dest_ssl,
+                )
+        except ReplyError as e:
+            await stream.close()
+            raise ProxyError(e, error_code=e.error_code)
+        except (asyncio.CancelledError, Exception):
+            await stream.close()
+            raise
 
-    async def _negotiate(self):
-        raise NotImplementedError()
+        return stream
 
-    async def _close(self):
-        if self._stream is not None:
-            await self._stream.close()
+    @classmethod
+    def create(cls, *args, **kwargs):  # for backward compatibility
+        return cls(*args, **kwargs)
 
-    @property
-    def proxy_host(self):
-        return self._proxy_host
-
-    @property
-    def proxy_port(self):
-        return self._proxy_port
-
-
-class Socks5Proxy(AsyncioProxy):
-    def __init__(
-        self,
-        proxy_host,
-        proxy_port,
-        username=None,
-        password=None,
-        rdns=None,
-        proxy_ssl=None,
-        loop: asyncio.AbstractEventLoop = None,
-    ):
-        super().__init__(
-            proxy_host=proxy_host,
-            proxy_port=proxy_port,
-            proxy_ssl=proxy_ssl,
-            loop=loop,
-        )
-        self._username = username
-        self._password = password
-        self._rdns = rdns
-
-    async def _negotiate(self):
-        proto = Socks5Proto(
-            stream=self._stream,
-            resolver=self._resolver,
-            dest_host=self._dest_host,
-            dest_port=self._dest_port,
-            username=self._username,
-            password=self._password,
-            rdns=self._rdns,
-        )
-        await proto.negotiate()
-
-
-class Socks4Proxy(AsyncioProxy):
-    def __init__(
-        self,
-        proxy_host,
-        proxy_port,
-        user_id=None,
-        rdns=None,
-        proxy_ssl=None,
-        loop: asyncio.AbstractEventLoop = None,
-    ):
-        super().__init__(
-            proxy_host=proxy_host,
-            proxy_port=proxy_port,
-            proxy_ssl=proxy_ssl,
-            loop=loop,
-        )
-        self._user_id = user_id
-        self._rdns = rdns
-
-    async def _negotiate(self):
-        proto = Socks4Proto(
-            stream=self._stream,
-            resolver=self._resolver,
-            dest_host=self._dest_host,
-            dest_port=self._dest_port,
-            user_id=self._user_id,
-            rdns=self._rdns,
-        )
-        await proto.negotiate()
-
-
-class HttpProxy(AsyncioProxy):
-    def __init__(
-        self,
-        proxy_host,
-        proxy_port,
-        username=None,
-        password=None,
-        proxy_ssl=None,
-        loop: asyncio.AbstractEventLoop = None,
-    ):
-        super().__init__(
-            proxy_host=proxy_host,
-            proxy_port=proxy_port,
-            proxy_ssl=proxy_ssl,
-            loop=loop,
-        )
-        self._username = username
-        self._password = password
-
-    async def _negotiate(self):
-        proto = HttpProto(
-            stream=self._stream,  # noqa
-            dest_host=self._dest_host,
-            dest_port=self._dest_port,
-            username=self._username,
-            password=self._password,
-        )
-        await proto.negotiate()
+    @classmethod
+    def from_url(cls, url: str, **kwargs) -> 'AsyncioProxy':
+        url_args = parse_proxy_url(url)
+        return cls(*url_args, **kwargs)

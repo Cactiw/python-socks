@@ -1,27 +1,4 @@
-class SyncProxy:
-    def connect(self, dest_host, dest_port, timeout=None, **kwargs):
-        raise NotImplementedError()
-
-    @property
-    def proxy_host(self):
-        raise NotImplementedError()
-
-    @property
-    def proxy_port(self):
-        raise NotImplementedError()
-
-
-class AsyncProxy:
-    async def connect(self, dest_host, dest_port, timeout=None, **kwargs):
-        raise NotImplementedError()
-
-    @property
-    def proxy_host(self):
-        raise NotImplementedError()
-
-    @property
-    def proxy_port(self):
-        raise NotImplementedError()
+from typing import Optional
 
 
 class SyncResolver:
@@ -39,7 +16,7 @@ class SyncSocketStream:
     def write_all(self, data: bytes):
         raise NotImplementedError()
 
-    def read(self, max_bytes: int = None):
+    def read(self, max_bytes: Optional[int] = None):
         raise NotImplementedError()
 
     def read_exact(self, n: int):
@@ -53,7 +30,7 @@ class AsyncSocketStream:
     async def write_all(self, data: bytes):
         raise NotImplementedError()
 
-    async def read(self, max_bytes: int = None):
+    async def read(self, max_bytes: Optional[int] = None):
         raise NotImplementedError()
 
     async def read_exact(self, n: int):

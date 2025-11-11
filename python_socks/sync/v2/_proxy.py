@@ -1,199 +1,121 @@
 import socket
 import ssl
-from typing import Optional
+from typing import Any, Optional
 
+from ._connect import connect_tcp
 from ._stream import SyncSocketStream
-from .._connect import connect_tcp
 from .._resolver import SyncResolver
-from ... import _abc as abc
-from ..._errors import ProxyConnectionError, ProxyTimeoutError
-from ..._proto.http_sync import HttpProto
-from ..._proto.socks4_sync import Socks4Proto
-from ..._proto.socks5_sync import Socks5Proto
+from ..._types import ProxyType
+from ..._errors import ProxyConnectionError, ProxyTimeoutError, ProxyError
+from ..._helpers import parse_proxy_url
+
+from ..._protocols.errors import ReplyError
+from ..._connectors.factory_sync import create_connector
+
 
 DEFAULT_TIMEOUT = 60
 
 
-class SyncProxy(abc.SyncProxy):
-    _stream: Optional[SyncSocketStream]
-
+class SyncProxy:
     def __init__(
         self,
-        proxy_host: str,
-        proxy_port: int,
-        proxy_ssl: ssl.SSLContext = None,
+        proxy_type: ProxyType,
+        host: str,
+        port: int,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        rdns: Optional[bool] = None,
+        proxy_ssl: Optional[ssl.SSLContext] = None,
+        forward: Optional['SyncProxy'] = None,
     ):
-        self._proxy_host = proxy_host
-        self._proxy_port = proxy_port
+        self._proxy_type = proxy_type
+        self._proxy_host = host
+        self._proxy_port = port
+        self._username = username
+        self._password = password
+        self._rdns = rdns
         self._proxy_ssl = proxy_ssl
+        self._forward = forward
 
-        self._dest_host = None
-        self._dest_port = None
-        self._dest_ssl = None
-        self._timeout = None
-
-        self._stream = None
         self._resolver = SyncResolver()
 
     def connect(
         self,
         dest_host: str,
         dest_port: int,
-        dest_ssl: ssl.SSLContext = None,
-        timeout: float = None,
-        _stream: SyncSocketStream = None,
+        dest_ssl: Optional[ssl.SSLContext] = None,
+        timeout: Optional[float] = None,
+        **kwargs: Any,
     ) -> SyncSocketStream:
-
         if timeout is None:
             timeout = DEFAULT_TIMEOUT
 
-        self._dest_host = dest_host
-        self._dest_port = dest_port
-        self._dest_ssl = dest_ssl
-        self._timeout = timeout
-
-        try:
-            if _stream is None:
-                sock = connect_tcp(
+        if self._forward is None:
+            local_addr = kwargs.get('local_addr')
+            try:
+                stream = connect_tcp(
                     host=self._proxy_host,
                     port=self._proxy_port,
                     timeout=timeout,
+                    local_addr=local_addr,
                 )
-                self._stream = SyncSocketStream(sock)
-            else:
-                self._stream = _stream
+            except OSError as e:
+                msg = 'Could not connect to proxy {}:{} [{}]'.format(
+                    self._proxy_host,
+                    self._proxy_port,
+                    e.strerror,
+                )
+                raise ProxyConnectionError(e.errno, msg) from e
+        else:
+            stream = self._forward.connect(
+                dest_host=self._proxy_host,
+                dest_port=self._proxy_port,
+                timeout=timeout,
+            )
 
+        try:
             if self._proxy_ssl is not None:
-                self._stream = self._stream.start_tls(
+                stream = stream.start_tls(
                     hostname=self._proxy_host,
                     ssl_context=self._proxy_ssl,
                 )
 
-            self._negotiate()
+            connector = create_connector(
+                proxy_type=self._proxy_type,
+                username=self._username,
+                password=self._password,
+                rdns=self._rdns,
+                resolver=self._resolver,
+            )
+            connector.connect(
+                stream=stream,
+                host=dest_host,
+                port=dest_port,
+            )
 
-            if self._dest_ssl is not None:
-                self._stream = self._stream.start_tls(
-                    hostname=self._dest_host,
-                    ssl_context=self._dest_ssl,
+            if dest_ssl is not None:
+                stream = stream.start_tls(
+                    hostname=dest_host,
+                    ssl_context=dest_ssl,
                 )
 
-            return self._stream
+            return stream
 
         except socket.timeout as e:
-            self._close()
-            raise ProxyTimeoutError('Proxy connection timed out: {}'.format(self._timeout)) from e
-        except OSError as e:
-            self._close()
-            msg = 'Could not connect to proxy {}:{} [{}]'.format(
-                self._proxy_host,
-                self._proxy_port,
-                e.strerror,
-            )
-            raise ProxyConnectionError(e.errno, msg) from e
+            stream.close()
+            raise ProxyTimeoutError(f'Proxy connection timed out: {timeout}') from e
+        except ReplyError as e:
+            stream.close()
+            raise ProxyError(e, error_code=e.error_code)
         except Exception:
-            self._close()
+            stream.close()
             raise
 
-    def _negotiate(self):
-        raise NotImplementedError
+    @classmethod
+    def create(cls, *args, **kwargs):  # for backward compatibility
+        return cls(*args, **kwargs)
 
-    def _close(self):
-        if self._stream is not None:
-            self._stream.close()
-
-    @property
-    def proxy_host(self):
-        return self._proxy_host
-
-    @property
-    def proxy_port(self):
-        return self._proxy_port
-
-
-class Socks5Proxy(SyncProxy):
-    def __init__(
-        self,
-        proxy_host,
-        proxy_port,
-        username=None,
-        password=None,
-        rdns=None,
-        proxy_ssl=None,
-    ):
-        super().__init__(
-            proxy_host=proxy_host,
-            proxy_port=proxy_port,
-            proxy_ssl=proxy_ssl,
-        )
-        self._username = username
-        self._password = password
-        self._rdns = rdns
-
-    def _negotiate(self):
-        proto = Socks5Proto(
-            stream=self._stream,
-            resolver=self._resolver,
-            dest_host=self._dest_host,
-            dest_port=self._dest_port,
-            username=self._username,
-            password=self._password,
-            rdns=self._rdns,
-        )
-        proto.negotiate()
-
-
-class Socks4Proxy(SyncProxy):
-    def __init__(
-        self,
-        proxy_host,
-        proxy_port,
-        user_id=None,
-        rdns=None,
-        proxy_ssl=None,
-    ):
-        super().__init__(
-            proxy_host=proxy_host,
-            proxy_port=proxy_port,
-            proxy_ssl=proxy_ssl,
-        )
-        self._user_id = user_id
-        self._rdns = rdns
-
-    def _negotiate(self):
-        proto = Socks4Proto(
-            stream=self._stream,
-            resolver=self._resolver,
-            dest_host=self._dest_host,
-            dest_port=self._dest_port,
-            user_id=self._user_id,
-            rdns=self._rdns,
-        )
-        proto.negotiate()
-
-
-class HttpProxy(SyncProxy):
-    def __init__(
-        self,
-        proxy_host,
-        proxy_port,
-        username=None,
-        password=None,
-        proxy_ssl=None,
-    ):
-        super().__init__(
-            proxy_host=proxy_host,
-            proxy_port=proxy_port,
-            proxy_ssl=proxy_ssl,
-        )
-        self._username = username
-        self._password = password
-
-    def _negotiate(self):
-        proto = HttpProto(
-            stream=self._stream,
-            dest_host=self._dest_host,
-            dest_port=self._dest_port,
-            username=self._username,
-            password=self._password,
-        )
-        proto.negotiate()
+    @classmethod
+    def from_url(cls, url: str, **kwargs) -> 'SyncProxy':
+        url_args = parse_proxy_url(url)
+        return cls(*url_args, **kwargs)
